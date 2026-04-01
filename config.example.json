@@ -1,0 +1,39 @@
+{
+  "_comment": "Privacy Proxy Server Configuration Example",
+  "_description": "Copy this file to config.json and modify as needed",
+  "privacy": {
+    "enabled": true,
+    "strategy": "placeholder",
+    "auto_redact": true,
+    "skip_validation": false,
+    "excluded_types": ["url", "ipv4"],
+    "custom_rules": [
+      {
+        "name": "order_id",
+        "pattern": "订单号[:：]\\s*([A-Z0-9]{10,20})",
+        "risk_level": "low"
+      },
+      {
+        "name": "employee_id",
+        "pattern": "工号[:：]\\s*(\\d{6})",
+        "risk_level": "medium"
+      }
+    ]
+  },
+  "proxy": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "openai_base_url": "https://api.openai.com/v1",
+    "openai_api_key": "YOUR_OPENAI_API_KEY_HERE",
+    "timeout": 30,
+    "max_retries": 3,
+    "verify_ssl": true
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "privacy_proxy.log",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "audit_log": true,
+    "audit_file": "audit.log"
+  }
+}
