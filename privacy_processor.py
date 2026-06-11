@@ -7,16 +7,23 @@ import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
-# Add privacy-guard to path
-privacy_guard_path = Path(__file__).parent.parent / "privacy-guard"
-sys.path.insert(0, str(privacy_guard_path))
-
 try:
     from privacy_guard import PrivacyGuard
 
     HAS_PRIVACY_GUARD = True
 except ImportError:
-    HAS_PRIVACY_GUARD = False
+    # Development fallback: allow running from a sibling checkout layout:
+    #   Mby159/privacy-proxy
+    #   Mby159/privacy-guard
+    privacy_guard_path = Path(__file__).parent.parent / "privacy-guard"
+    if privacy_guard_path.exists():
+        sys.path.insert(0, str(privacy_guard_path))
+    try:
+        from privacy_guard import PrivacyGuard
+
+        HAS_PRIVACY_GUARD = True
+    except ImportError:
+        HAS_PRIVACY_GUARD = False
 
 from models import PrivacyResult, SensitiveItem, RiskLevel
 from config import PrivacyConfig
