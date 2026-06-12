@@ -182,9 +182,12 @@ class PrivacyProxyServer:
                     response.privacy_result.detected_items
                 )
 
-            # Create response
+            # Create response. Do not pass upstream Content-Type/Length style
+            # headers into json_response(): aiohttp sets them itself and raises
+            # if Content-Type is supplied twice.
+            safe_headers = self._filter_response_headers(response.headers)
             web_response = web.json_response(
-                response.body, status=response.status_code, headers=response.headers
+                response.body, status=response.status_code, headers=safe_headers
             )
 
             # Add custom headers
@@ -200,6 +203,24 @@ class PrivacyProxyServer:
         except Exception as e:
             self.logger.error(f"Proxy request failed: {str(e)}")
             return web.json_response({"error": str(e)}, status=500)
+
+    def _filter_response_headers(self, headers: Dict[str, str]) -> Dict[str, str]:
+        """Filter upstream headers before sending aiohttp JSON responses."""
+        blocked = {
+            "connection",
+            "content-encoding",
+            "content-length",
+            "content-type",
+            "date",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+        }
+        return {k: v for k, v in headers.items() if k.lower() not in blocked}
 
     async def handle_process(self, request: web.Request) -> web.Response:
         """Handle text processing requests."""
