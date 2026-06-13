@@ -7,16 +7,23 @@ import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
-# Add privacy-guard to path
-privacy_guard_path = Path(__file__).parent.parent / "privacy-guard"
-sys.path.insert(0, str(privacy_guard_path))
-
 try:
     from privacy_guard import PrivacyGuard
 
     HAS_PRIVACY_GUARD = True
 except ImportError:
-    HAS_PRIVACY_GUARD = False
+    # Development fallback: allow running from a sibling checkout layout:
+    #   Mby159/privacy-proxy
+    #   Mby159/privacy-guard
+    privacy_guard_path = Path(__file__).parent.parent / "privacy-guard"
+    if privacy_guard_path.exists():
+        sys.path.insert(0, str(privacy_guard_path))
+    try:
+        from privacy_guard import PrivacyGuard
+
+        HAS_PRIVACY_GUARD = True
+    except ImportError:
+        HAS_PRIVACY_GUARD = False
 
 from models import PrivacyResult, SensitiveItem, RiskLevel
 from config import PrivacyConfig
@@ -114,20 +121,26 @@ class PrivacyProcessor:
     def process_openai_messages(
         self, messages: List[Dict[str, str]], strategy: Optional[str] = None
     ) -> List[Dict[str, str]]:
+        """Process OpenAI messages for sensitive information."""
+        processed_messages, _ = self.process_openai_messages_with_mapping(
+            messages, strategy
+        )
+        return processed_messages
+
+    def process_openai_messages_with_mapping(
+        self, messages: List[Dict[str, str]], strategy: Optional[str] = None
+    ) -> tuple[List[Dict[str, str]], Dict[str, str]]:
         """
-        Process OpenAI messages for sensitive information.
+        Process OpenAI messages and return a restore mapping.
 
-        Args:
-            messages: List of OpenAI message objects
-            strategy: Override strategy
-
-        Returns:
-            Processed messages
+        The proxy needs the mapping to restore placeholders in the response
+        after the upstream provider returns.
         """
         if not self.config.enabled or not self.guard:
-            return messages
+            return messages, {}
 
         processed_messages = []
+        combined_mapping: Dict[str, str] = {}
         for message in messages:
             if message.get("role") == "user" and "content" in message:
                 content = message["content"]
@@ -136,6 +149,7 @@ class PrivacyProcessor:
                 if isinstance(content, str):
                     result = self.process_text(content, strategy)
                     processed_content = result.processed_text
+                    combined_mapping.update(result.mapping)
                 elif isinstance(content, list):
                     # Handle multimodal content
                     processed_content = []
@@ -143,9 +157,10 @@ class PrivacyProcessor:
                         if part.get("type") == "text":
                             text = part["text"]
                             result = self.process_text(text, strategy)
-                            processed_content.append(
-                                {"type": "text", "text": result.processed_text}
-                            )
+                            combined_mapping.update(result.mapping)
+                            processed_part = part.copy()
+                            processed_part["text"] = result.processed_text
+                            processed_content.append(processed_part)
                         else:
                             processed_content.append(part)
                 else:
@@ -157,7 +172,7 @@ class PrivacyProcessor:
             else:
                 processed_messages.append(message)
 
-        return processed_messages
+        return processed_messages, combined_mapping
 
     def _calculate_risk_level(self, items: List[SensitiveItem]) -> RiskLevel:
         """Calculate overall risk level from detected items."""

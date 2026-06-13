@@ -52,11 +52,14 @@ class OpenAIProxy:
 
         try:
             # Prepare request for OpenAI
-            openai_url = f"{self.config.openai_base_url.rstrip('/')}{request.path}"
+            openai_url = self._build_upstream_url(request.path)
             headers = self._prepare_headers(request.headers)
 
-            # Process request body for privacy
-            processed_body = await self._process_request_body(request.body, request)
+            # Process request body for privacy and keep restore mapping for
+            # response post-processing on the trusted/local side.
+            processed_body, restore_map = await self._process_request_body(
+                request.body, request
+            )
 
             # Make request to OpenAI
             session = await self.ensure_session()
@@ -76,7 +79,7 @@ class OpenAIProxy:
 
                 # Process response body for privacy (if needed)
                 processed_response = await self._process_response_body(
-                    response_body, response_headers, openai_response.status
+                    response_body, response_headers, openai_response.status, restore_map
                 )
 
                 processing_time = (time.time() - start_time) * 1000
@@ -110,6 +113,20 @@ class OpenAIProxy:
                 processing_time_ms=processing_time,
             )
 
+    def _build_upstream_url(self, request_path: str) -> str:
+        """Build upstream URL without duplicating /v1.
+
+        The public proxy routes are OpenAI-compatible and include /v1, e.g.
+        /v1/chat/completions. The configured upstream base URL is commonly
+        also https://api.openai.com/v1. Joining them directly produces
+        /v1/v1/chat/completions, so normalize that case.
+        """
+        base = self.config.openai_base_url.rstrip("/")
+        path = request_path if request_path.startswith("/") else f"/{request_path}"
+        if base.endswith("/v1") and path.startswith("/v1/"):
+            path = path[3:]
+        return f"{base}{path}"
+
     def _prepare_headers(self, original_headers: Dict[str, str]) -> Dict[str, str]:
         """Prepare headers for OpenAI API request."""
         headers = original_headers.copy()
@@ -130,21 +147,25 @@ class OpenAIProxy:
 
     async def _process_request_body(
         self, body: Optional[Union[Dict, str]], request: ProxyRequest
-    ) -> Optional[Union[Dict, str]]:
-        """Process request body for privacy."""
+    ) -> tuple[Optional[Union[Dict, str]], Dict[str, str]]:
+        """Process request body for privacy and return restore mapping."""
         if body is None:
-            return None
+            return None, {}
 
         if not request.is_openai_request:
-            return body
+            return body, {}
+
+        restore_map: Dict[str, str] = {}
 
         # Process OpenAI chat requests
         if request.is_openai_chat and isinstance(body, dict):
             if "messages" in body:
-                body["messages"] = self.processor.process_openai_messages(
-                    body["messages"]
+                body["messages"], restore_map = (
+                    self.processor.process_openai_messages_with_mapping(
+                        body["messages"]
+                    )
                 )
-                return body
+                return body, restore_map
 
         # Process OpenAI embedding requests
         if request.is_openai_embedding and isinstance(body, dict):
@@ -155,23 +176,28 @@ class OpenAIProxy:
                 if isinstance(input_data, str):
                     result = self.processor.process_text(input_data)
                     body["input"] = result.processed_text
+                    restore_map.update(result.mapping)
                 elif isinstance(input_data, list):
                     # List of strings
                     if all(isinstance(item, str) for item in input_data):
                         processed_inputs = []
                         for text in input_data:
                             result = self.processor.process_text(text)
+                            restore_map.update(result.mapping)
                             processed_inputs.append(result.processed_text)
                         body["input"] = processed_inputs
                     # List of message objects (for chat completions used as embeddings)
                     elif all(isinstance(item, dict) for item in input_data):
-                        body["input"] = self.processor.process_openai_messages(
-                            input_data
+                        body["input"], msg_map = (
+                            self.processor.process_openai_messages_with_mapping(
+                                input_data
+                            )
                         )
+                        restore_map.update(msg_map)
 
-                return body
+                return body, restore_map
 
-        return body
+        return body, restore_map
 
     async def _read_response_body(
         self, response: aiohttp.ClientResponse
@@ -192,11 +218,32 @@ class OpenAIProxy:
         body: Optional[Union[Dict, str]],
         headers: Dict[str, str],
         status_code: int,
+        restore_map: Optional[Dict[str, str]] = None,
     ) -> Optional[Union[Dict, str]]:
-        """Process response body for privacy (optional)."""
-        # For now, just return the body as-is
-        # Could add response processing here if needed
-        return body
+        """Restore placeholders in response bodies on the local side."""
+        if not restore_map:
+            return body
+        return self._restore_placeholders(body, restore_map)
+
+    def _restore_placeholders(
+        self, value: Optional[Union[Dict, List, str]], restore_map: Dict[str, str]
+    ) -> Optional[Union[Dict, List, str]]:
+        """Recursively restore placeholder strings in JSON-compatible values."""
+        if isinstance(value, str):
+            restored = value
+            for placeholder, original in sorted(
+                restore_map.items(), key=lambda item: len(item[0]), reverse=True
+            ):
+                restored = restored.replace(placeholder, original)
+            return restored
+        if isinstance(value, list):
+            return [self._restore_placeholders(item, restore_map) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: self._restore_placeholders(item, restore_map)
+                for key, item in value.items()
+            }
+        return value
 
     async def health_check(self) -> Dict[str, Any]:
         """Check OpenAI API connectivity."""
